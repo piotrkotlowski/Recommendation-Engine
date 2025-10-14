@@ -1,0 +1,261 @@
+services:
+
+  postgres_db:
+    image: ${PG_IMAGE}
+    container_name: ${PG_CONTAINER_NAME}
+    environment:
+      POSTGRES_USER: ${PG_USER}
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_DB: ${PG_DATABASE}
+    env_file: .env
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER} -d ${PG_DATABASE}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - internal_db_net
+    expose:
+      - ${PG_PORT_DOCKER}
+  redis:
+    image: ${REDIS_IMAGE}
+    container_name: ${REDIS_CONTAINER_NAME}
+    env_file: .env
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal_db_net
+    expose:
+      - ${REDIS_PORT_DOCKER}
+
+  chroma_db:
+    image: ${CHROMA_IMAGE}
+    container_name: ${CHROMA_CONTAINER_NAME}
+    env_file: .env
+    volumes:
+      - chroma_data:/data
+    healthcheck:
+      test: ["CMD", "/bin/bash", "-c", "cat < /dev/null > /dev/tcp/localhost/8000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - internal_db_net
+    expose:
+      - ${CHROMA_PORT_DOCKER}
+
+
+  ingest_pg:
+    build:
+      context: .
+      dockerfile: docker_ingest_pg/Dockerfile
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE}
+    container_name: ingest_pg
+    env_file: .env
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+    restart: no
+    volumes:
+      - ./data_ingest:/data_ingest
+      - ./scripts/ingest_postgres.py:/ingest/ingest_postgres.py
+    networks:
+      - internal_db_net
+
+  ingest_chroma:
+    build:
+      context: .
+      dockerfile: docker_ingest_chroma/Dockerfile
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE}
+    container_name: ingest_chroma
+    env_file: .env
+    depends_on:
+      chroma_db:
+        condition: service_healthy
+    restart: no
+    volumes:
+      - ./data_ingest:/data_ingest
+      - ./scripts/ingest_chromadb.py:/ingest/ingest_chromadb.py
+    networks:
+      - internal_db_net
+
+
+  ollama:
+    image: ${OLLAMA_IMAGE}
+    container_name: ${OLLAMA_CONTAINER_NAME}
+    env_file: .env
+    environment:
+      - OLLAMA_HOST=${OLLAMA_HOST}
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - internal_db_net 
+    expose:
+      - ${OLLAMA_PORT_DOCKER}
+
+  ollama-model-init:
+    image: ollama/ollama:latest
+    container_name: pull_ollama_model
+    depends_on:
+      ollama:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - OLLAMA_HOST=${OLLAMA_URL}
+    command: pull ${OLLAMA_MODEL}
+    volumes:
+      - ollama:/root/.ollama
+    restart: no
+    networks:
+      - internal_db_net
+
+
+  als_trainer:
+    container_name: ${ALS_TRAINER_CONTAINER_NAME}
+    build:
+      context: .
+      dockerfile: docker_als_trainer/Dockerfile
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE}
+    env_file: .env
+    volumes:
+      - ./als_trainer:/app/als_trainer
+      - ./config.py:/app/config.py
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+      chroma_db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - internal_db_net 
+    expose:
+      - ${ALS_TRAINER_DOCKER_PORT}
+
+
+  als_reco_engine:
+    build:
+      context: .
+      dockerfile: docker_als_engine/Dockerfile
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE}
+    container_name: ${ALS_RECO_ENGINE_CONTAINER_NAME}
+    ports:
+      - "8001:8000"
+    env_file: .env
+    volumes:
+      - ./als_reco_engine:/app/als_reco_engine
+      - ./config.py:/app/config.py
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+      chroma_db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      als_trainer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - default   
+      - internal_db_net
+
+  chat_reco_engine:
+    build:
+      context: .
+      dockerfile: docker_chat_engine/Dockerfile
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE}
+    container_name: ${CHAT_RECO_CONTAINER_NAME}
+    ports:
+      - "8002:8000"
+    env_file: .env
+    volumes:
+      - ./chat_reco_engine:/app/chat_reco_engine
+      - ./config.py:/app/config.py
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+      chroma_db:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - default
+      - internal_db_net
+
+
+volumes:
+  pgdata: {}
+  ollama: {}
+  chroma_data: {}
+  redisdata: {}
+
+
+networks:
+  internal_db_net:
+    driver: bridge
+    internal: true
+  default:
+    driver: bridge
