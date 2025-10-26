@@ -28,8 +28,7 @@ class Settings(BaseSettings):
     PG_USER: str = "postgres"
     PG_PASSWORD: str = "mouse"
     PG_DATABASE: str = "amazon"
-    PG_Container_Name: str = "recommender_postgres"
-    PG_Image: str = "postgres:15-alpine"
+
     PG_Ingestion_Csv_Users: str = "/data_ingest/users.csv"
     PG_Ingestion_Csv_Items: str = "/data_ingest/items.csv"
     PG_Ingestion_Csv_Interactions: str = "/data_ingest/interactions.csv"
